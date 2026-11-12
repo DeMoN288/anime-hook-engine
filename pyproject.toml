@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "anime-hook"
-version = "1.1.0"
+version = "1.2.0"
 description = "Async bilingual anime hook velocity & emotional climax intelligence engine with MCP server"
 readme = "README.md"
 requires-python = ">=3.11"
