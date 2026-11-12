@@ -32,6 +32,8 @@ def render_analysis(console: Console, profile: TitleProfile, report: HookReport)
     ):
         table.add_row(Text(label), Text(value))
     console.print(Panel(table, title=Text(profile.title.display)))
+    for snippet in report.review_snippets:
+        console.print(Text(f"  Отзыв: {snippet}", style="cyan"))
     _warnings(console, report.warnings)
 
 
@@ -47,6 +49,11 @@ def render_recommendations(console: Console, result: RecommendationResult) -> No
         )
     console.print(table)
     console.print(f"Проверено кандидатов: {result.candidates_checked}")
+    for item in result.items:
+        if item.report.review_snippets:
+            console.print(Text(f"\n[{item.profile.title.display}]", style="bold"))
+            for snippet in item.report.review_snippets:
+                console.print(Text(f"  • {snippet}", style="cyan"))
     _warnings(console, result.warnings)
     for item in result.items:
         _warnings(console, [

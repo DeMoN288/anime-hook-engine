@@ -255,18 +255,39 @@ class Recommender:
         return profile
 
     async def _candidates(self, seed: TitleProfile, limit: int) -> list[TitleProfile]:
-        try:
-            data = await self._graphql(
-                "query ($genres: [String], $limit: Int!) { Page(perPage: $limit) { "
-                "media(type: ANIME, genre_in: $genres, sort: SCORE_DESC) { "
-                + MEDIA_FIELDS + " } } }",
-                {"genres": seed.genres or None, "limit": limit},
-            )
-            profiles = [_anilist_profile(row) for row in data["Page"]["media"]]
-            if profiles:
-                return profiles
-        except (APIError, ValidationError, KeyError, TypeError, ValueError) as exc:
-            self.warnings.append(f"AniList candidates: {exc}")
+        profiles: list[TitleProfile] = []
+        if seed.anilist_id or seed.mal_id:
+            try:
+                selector = "id" if seed.anilist_id else "idMal"
+                identifier = seed.anilist_id or seed.mal_id
+                rec_data = await self._graphql(
+                    "query ($id: Int!, $limit: Int!) { Media(" + selector
+                    + ": $id, type: ANIME) { recommendations(perPage: $limit, sort: RATING_DESC)"
+                    " { nodes { mediaRecommendation { " + MEDIA_FIELDS + " } } } } }",
+                    {"id": identifier, "limit": limit},
+                )
+                nodes = ((rec_data.get("Media") or {}).get("recommendations") or {}).get(
+                    "nodes", []
+                )
+                for node in nodes:
+                    media = (node or {}).get("mediaRecommendation")
+                    if media:
+                        profiles.append(_anilist_profile(media))
+            except (APIError, ValidationError, KeyError, TypeError, ValueError) as exc:
+                self.warnings.append(f"AniList recommendations: {exc}")
+        if len(profiles) < limit:
+            try:
+                data = await self._graphql(
+                    "query ($genres: [String], $limit: Int!) { Page(perPage: $limit) { "
+                    "media(type: ANIME, countryOfOrigin: JP, genre_in: $genres, "
+                    "sort: SCORE_DESC) { " + MEDIA_FIELDS + " } } }",
+                    {"genres": seed.genres or None, "limit": limit},
+                )
+                profiles.extend(_anilist_profile(row) for row in data["Page"]["media"])
+            except (APIError, ValidationError, KeyError, TypeError, ValueError) as exc:
+                self.warnings.append(f"AniList candidates: {exc}")
+        if profiles:
+            return profiles
         rows = await self._shiki("animes", order="ranked", limit=limit, page=1)
         if not isinstance(rows, list):
             raise APIError("Shikimori: expected a list of candidates")
@@ -337,10 +358,12 @@ class Recommender:
                 and "slow" not in votes and not report.components.get("slow", 0)
                 and min_hvi <= 60
             )
-            if ((not provisional and (report.hvi < max(60, min_hvi)
-                    or report.pacing_type in {"SLOW_BURN", "DROP_PRONE"}
-                    or report.verdict == "AVOID_SLOW_START"))
-                    or similarity < min_similarity):
+            hard_block = (
+                report.pacing_type == "SLOW_BURN"
+                or (min_hvi >= 60 and (report.hvi < 60 or report.verdict == "AVOID_SLOW_START"))
+                or report.hvi < min_hvi
+            )
+            if (not provisional and hard_block) or similarity < min_similarity:
                 return None
             if provisional:
                 note = (

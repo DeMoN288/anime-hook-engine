@@ -53,6 +53,7 @@ async def anime_analyze_hook(
             "verdict": report.verdict,
             "confidence": report.confidence,
             "key_cues": report.key_cues,
+            "review_snippets": report.review_snippets,
             "components": report.components,
             "warnings": report.warnings,
         }
@@ -99,6 +100,7 @@ async def anime_recommend_fast_paced(
                 "pacing": item.report.pacing_type,
                 "verdict": item.report.verdict,
                 "genres": item.profile.genres,
+                "review_snippets": item.report.review_snippets,
             })
 
         output = {

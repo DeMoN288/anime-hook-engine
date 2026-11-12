@@ -19,15 +19,20 @@ class Cue:
 
 CUES = [
     Cue("first_episode_hook", "instant",
-        r"захватыва\w*\s+с\s+перв\w*\s+сери\w*|"
-        r"затянул\w*\s+с\s+перв\w*\s+минут\w*|"
+        r"захватыва\w*\s+с\s+перв\w*\s+(?:сери\w*|минут\w*)|"
+        r"затянул\w*\s+с\s+перв\w*\s+(?:минут\w*|сери\w*)|"
         r"сразу\s+(?:же\s+)?(?:в\s+)?(?:экшен|экшн|действие)|"
-        r"(?:hooked|gripping)\s+(?:me\s+)?(?:from|in)\s+(?:the\s+)?first\s+episode|"
+        r"(?:hooked|gripping|captivating)\s+(?:me\s+)?(?:from|in)\s+"
+        r"(?:the\s+)?(?:very\s+)?first\s+(?:episode|minute)|"
+        r"(?:great|strong|amazing|incredible)\s+(?:first\s+episode|opening|start)|"
         r"instant[ -]hook"),
-    Cue("binge_worthy", "fast", r"binge[ -]worthy|смотр\w*\s+на\s+одном\s+дыхании"),
+    Cue("binge_worthy", "fast",
+        r"binge[ -]worthy|binge[ -]watch\w*|смотр\w*\s+на\s+одном\s+дыхании|не\s+оторваться"),
     Cue("fast_pacing", "fast",
-        r"быстр\w*\s+(?:темп|старт)|динамичн\w*\s+с\s+начал\w*|"
-        r"fast[ -]paced|fast\s+start|не\s+скучн\w*|без\s+затянутости"),
+        r"быстр\w*\s+(?:темп|старт)|бодр\w*\s+(?:начал\w*|старт)|динамичн\w*|"
+        r"держит\s+в\s+напряжении|fast[ -]paced|fast\s+start|great\s+pacing|"
+        r"good\s+pacing|action[- ]packed|never\s+(?:a\s+)?dull\s+moment|"
+        r"не\s+скучн\w*|без\s+затянутости"),
     Cue("slow_start", "slow",
         r"долго\s+раскачива\w*|медленн\w*\s+(?:разгон|старт)|"
         r"перв\w*\s+(?:\d+|пять|три|десять)\s+сери\w*\s+(?:\w+\s+)?"
@@ -102,27 +107,42 @@ def extract_votes(text: str) -> tuple[set[str], list[str]]:
     return categories, list(dict.fromkeys(found))
 
 
+def _review_snippet(text: str, limit: int = 180) -> str:
+    clean = " ".join(text.split())
+    if len(clean) <= limit:
+        return clean
+    return clean[: limit - 1].rstrip() + "…"
+
+
 class HookAnalyzer:
     def analyze(self, bundle: EvidenceBundle) -> HookReport:
-        documents: list[tuple[str, float]] = [(r.text, 1.0) for r in bundle.reviews]
+        documents: list[tuple[str, float, bool]] = [(r.text, 1.0, True) for r in bundle.reviews]
         if bundle.profile.first_episode_summary:
-            documents.append((bundle.profile.first_episode_summary, 0.5))
+            documents.append((bundle.profile.first_episode_summary, 0.5, False))
         if bundle.profile.synopsis:
-            documents.append((bundle.profile.synopsis, 0.25))
+            documents.append((bundle.profile.synopsis, 0.25, False))
         # Equal copied reviews must not multiply evidence, even across APIs.
         seen: set[str] = set()
         numerator, mass = 45.0, 0.0
         drama_numerator, drama_mass = 10.0, 0.0
         counts = {"instant": 0.0, "fast": 0.0, "slow": 0.0}
         cues: list[str] = []
+        matched_snippets: list[str] = []
+        fallback_snippets: list[str] = []
         evidence_count = 0
-        for text, weight in documents:
+        for text, weight, is_review in documents:
             normalized = " ".join(text.casefold().split())
             if not normalized or normalized in seen:
                 continue
             seen.add(normalized)
             votes, document_cues = extract_votes(text)
             cues.extend(document_cues)
+            if is_review:
+                snippet = _review_snippet(text)
+                if votes and len(matched_snippets) < 3:
+                    matched_snippets.append(snippet)
+                elif len(fallback_snippets) < 3:
+                    fallback_snippets.append(snippet)
             if votes:
                 evidence_count += 1
             pacing_votes = votes & counts.keys()
@@ -160,9 +180,11 @@ class HookAnalyzer:
             )
         if counts["slow"] and (counts["instant"] or counts["fast"]):
             warnings.append("Отзывы о темпе противоречат друг другу.")
+        snippets = (matched_snippets + fallback_snippets)[:3]
         return HookReport(
             hvi=hvi, drama_score=drama, pacing_type=pacing, verdict=verdict,
-            key_cues=list(dict.fromkeys(cues)), evidence_count=evidence_count,
+            key_cues=list(dict.fromkeys(cues)), review_snippets=snippets,
+            evidence_count=evidence_count,
             confidence=round(mass / (mass + 3), 3),
             components={"pacing_evidence_weight": mass, **counts}, warnings=warnings,
         )

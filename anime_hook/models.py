@@ -55,6 +55,7 @@ class HookReport(Model):
     pacing_type: Literal["INSTANT_HOOK", "STEADY_FAST", "SLOW_BURN", "DROP_PRONE"]
     verdict: Literal["MUST_WATCH", "GOOD_PACE", "AVOID_SLOW_START"]
     key_cues: list[str] = Field(default_factory=list)
+    review_snippets: list[str] = Field(default_factory=list)
     confidence: float = Field(default=0, ge=0, le=1)
     evidence_count: int = Field(default=0, ge=0)
     components: dict[str, float] = Field(default_factory=dict)
