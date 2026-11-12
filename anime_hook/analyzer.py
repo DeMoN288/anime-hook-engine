@@ -155,7 +155,9 @@ class HookAnalyzer:
             verdict = "GOOD_PACE"
         warnings = list(bundle.warnings)
         if mass == 0:
-            warnings.append("Нет свидетельств темпа первых эпизодов; HVI — консервативный prior 45.")
+            warnings.append(
+                "Нет свидетельств темпа первых эпизодов; HVI — консервативный prior 45."
+            )
         if counts["slow"] and (counts["instant"] or counts["fast"]):
             warnings.append("Отзывы о темпе противоречат друг другу.")
         return HookReport(

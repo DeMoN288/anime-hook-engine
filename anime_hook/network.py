@@ -4,7 +4,7 @@ import asyncio
 import os
 import random
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from typing import Any
 from urllib.parse import urlsplit
@@ -66,7 +66,7 @@ class AsyncAPIClient:
             self._clients[proxy] = httpx.AsyncClient(
                 proxy=proxy,
                 transport=self.transport,
-                timeout=4.0,
+                timeout=self.timeout,
                 follow_redirects=True,
                 trust_env=False,
                 headers={"User-Agent": "anime-hook/0.1 (personal recommendation research)",
@@ -77,7 +77,7 @@ class AsyncAPIClient:
     async def _pace(self, host: str) -> None:
         lock = self._locks.setdefault(host, asyncio.Lock())
         async with lock:
-            while (wait := self._next_request.get(host, 0) - time.monotonic()) > 0:
+            if (wait := self._next_request.get(host, 0) - time.monotonic()) > 0:
                 await asyncio.sleep(wait)
             self._next_request[host] = time.monotonic() + self._intervals.get(host, 0)
 
@@ -89,7 +89,8 @@ class AsyncAPIClient:
                 delay = float(value)
             except ValueError:
                 try:
-                    delay = (parsedate_to_datetime(value) - datetime.now(timezone.utc)).total_seconds()
+                    dt = parsedate_to_datetime(value)
+                    delay = (dt - datetime.now(UTC)).total_seconds()
                 except (ValueError, TypeError, OverflowError):
                     delay = 0
             return max(0, delay)
@@ -167,9 +168,18 @@ class AsyncAPIClient:
                 await asyncio.sleep(self._retry_delay(response, attempt))
         raise APIError(last_error, status_code=last_status)
 
-    async def graphql(self, query: str, variables: dict[str, Any]) -> dict[str, Any]:
+    async def graphql(
+        self,
+        query: str,
+        variables: dict[str, Any],
+        *,
+        fail_fast_on_rate_limit: bool = False,
+    ) -> dict[str, Any]:
         payload = await self.request_json(
-            "POST", "https://graphql.anilist.co", json={"query": query, "variables": variables}
+            "POST",
+            "https://graphql.anilist.co",
+            json={"query": query, "variables": variables},
+            fail_fast_on_rate_limit=fail_fast_on_rate_limit,
         )
         if not isinstance(payload, dict):
             raise APIError("AniList: invalid GraphQL response")

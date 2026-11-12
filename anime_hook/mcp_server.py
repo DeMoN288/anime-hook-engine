@@ -6,11 +6,9 @@ DramaScore, and fetch fast-paced recommendations.
 from __future__ import annotations
 
 import json
-from typing import Any
 
 from mcp.server.mcpserver import MCPServer
 
-from .models import EvidenceBundle, TitleProfile
 from .network import AsyncAPIClient
 from .recommender import Recommender
 
@@ -20,7 +18,7 @@ mcp = MCPServer("anime-hook-engine")
 @mcp.tool()
 async def anime_analyze_hook(
     title: str,
-    proxy: str | None = "http://127.0.0.1:2080",
+    proxy: str | None = None,
     review_limit: int = 15,
 ) -> str:
     """Analyze the opening pace and emotional hooks of an anime title.
@@ -32,8 +30,8 @@ async def anime_analyze_hook(
     - Verdict: (MUST_WATCH, GOOD_PACE, AVOID_SLOW_START).
 
     Args:
-        title: Anime title in English/Russian or MAL/Shikimori ID (e.g. "Solo Leveling", "Sword Art Online").
-        proxy: HTTP/SOCKS5 proxy URL (default "http://127.0.0.1:2080").
+        title: Anime title in English/Russian or MAL/Shikimori ID (e.g. "Solo Leveling").
+        proxy: Optional HTTP/SOCKS5 proxy URL (defaults to ANIME_HOOK_PROXY / fallback).
         review_limit: Maximum reviews to analyze (default 15).
     """
     async with AsyncAPIClient(proxy=proxy) as client:
@@ -66,7 +64,7 @@ async def anime_recommend_fast_paced(
     seed_title: str,
     limit: int = 5,
     min_hvi: float = 60.0,
-    proxy: str | None = "http://127.0.0.1:2080",
+    proxy: str | None = None,
 ) -> str:
     """Recommend similar anime titles with high initial Hook Velocity Index (HVI).
 
@@ -76,7 +74,7 @@ async def anime_recommend_fast_paced(
         seed_title: Reference title you liked (e.g. "Solo Leveling", "Attack on Titan").
         limit: Number of recommendations to return (1-10, default 5).
         min_hvi: Minimum acceptable Hook Velocity Index (0-100, default 60.0).
-        proxy: HTTP/SOCKS5 proxy URL (default "http://127.0.0.1:2080").
+        proxy: Optional HTTP/SOCKS5 proxy URL (defaults to ANIME_HOOK_PROXY / fallback).
     """
     async with AsyncAPIClient(proxy=proxy) as client:
         rec = Recommender(client)

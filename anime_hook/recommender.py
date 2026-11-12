@@ -70,6 +70,27 @@ def _anilist_profile(data: dict[str, Any]) -> TitleProfile:
     )
 
 
+def _merge_profile(
+    base: TitleProfile, incoming: TitleProfile, *, prefer_incoming: bool
+) -> TitleProfile:
+    primary, secondary = (incoming, base) if prefer_incoming else (base, incoming)
+    return base.model_copy(update={
+        "anilist_id": incoming.anilist_id or base.anilist_id,
+        "title": LocalizedTitle(
+            ru=primary.title.ru or secondary.title.ru,
+            en=primary.title.en or secondary.title.en,
+            romaji=primary.title.romaji or secondary.title.romaji,
+        ),
+        "genres": primary.genres or secondary.genres,
+        "synopsis": primary.synopsis or secondary.synopsis,
+        "score": primary.score if primary.score is not None else secondary.score,
+        "episodes": primary.episodes if primary.episodes is not None else secondary.episodes,
+        "first_episode_summary": (
+            primary.first_episode_summary or secondary.first_episode_summary
+        ),
+    })
+
+
 class Recommender:
     def __init__(self, client: AsyncAPIClient, analyzer: HookAnalyzer | None = None) -> None:
         self.client = client
@@ -82,16 +103,9 @@ class Recommender:
     async def _graphql(
         self, query: str, variables: dict[str, Any], *, evidence: bool = False,
     ) -> dict[str, Any]:
-        # Use the transport directly: the existing graphql helper has an invalid URL.
-        payload = await self.client.request_json(
-            "POST", "https://graphql.anilist.co", json={"query": query, "variables": variables},
-            **({"fail_fast_on_rate_limit": True} if evidence else {}),
+        return await self.client.graphql(
+            query, variables, fail_fast_on_rate_limit=evidence
         )
-        if not isinstance(payload, dict) or payload.get("errors"):
-            raise APIError("AniList: invalid response or GraphQL errors")
-        if not isinstance(payload.get("data"), dict):
-            raise APIError("AniList: missing GraphQL data")
-        return payload["data"]
 
     async def search(self, query: str, *, limit: int = 10) -> list[TitleProfile]:
         """Search by name; a numeric query resolves a MAL/Shikimori identifier."""
@@ -134,105 +148,100 @@ class Recommender:
             (p.title.romaji or "").casefold(),
         }), profiles[0])
 
-    async def collect_evidence(
-        self, profile: TitleProfile, *, review_limit: int = 20
-    ) -> EvidenceBundle:
-        if not 1 <= review_limit <= 50:
-            raise ValueError("review_limit must be between 1 and 50")
-        warnings: list[str] = []
+    async def _fetch_shikimori_evidence(
+        self, profile: TitleProfile, *, review_limit: int, warnings: list[str],
+    ) -> tuple[TitleProfile, list[Review]]:
         reviews: list[Review] = []
-        if profile.mal_id:
+        if not profile.mal_id:
+            return profile, reviews
+        try:
+            details = _shiki_profile(await self._shiki(f"animes/{profile.mal_id}"))
+            profile = _merge_profile(profile, details, prefer_incoming=True)
+        except (APIError, ValidationError, KeyError, TypeError, ValueError) as exc:
+            warnings.append(f"Shikimori profile: {exc}")
+        failures: list[str] = []
+        routes = [
+            ("topics", {"linked_id": profile.mal_id, "linked_type": "Anime", "kind": "review"}),
+            ("topics", {"linked_id": profile.mal_id, "linked_type": "Anime",
+                        "type": "Topics::EntryTopics::ReviewTopic"}),
+            ("reviews", {"target_id": profile.mal_id, "target_type": "Anime"}),
+        ]
+        for path, params in routes:
             try:
-                details = _shiki_profile(await self._shiki(f"animes/{profile.mal_id}"))
-                profile = details.model_copy(update={
-                    "anilist_id": profile.anilist_id,
-                    "synopsis": details.synopsis or profile.synopsis,
-                    "genres": details.genres or profile.genres,
-                    "score": details.score if details.score is not None else profile.score,
-                    "first_episode_summary": (
-                        details.first_episode_summary or profile.first_episode_summary
-                    ),
-                })
+                rows = _review_rows(await self._shiki(
+                    path, **params, limit=min(review_limit, 30), page=1,
+                ))
+                for row in rows:
+                    content = row.get("review") if isinstance(row.get("review"), dict) else row
+                    text = _text(content.get("body")) or _text(content.get("html_body"))
+                    identifier = content.get("id", row.get("id"))
+                    if text and identifier is not None:
+                        url = row.get("url") or content.get("url")
+                        if url and url.startswith("/"):
+                            url = f"https://shikimori.one{url}"
+                        reviews.append(Review(
+                            text=text, source="shikimori", id=str(identifier),
+                            url=url or (f"https://shikimori.one/reviews/{identifier}"
+                                        if path == "reviews" else None),
+                        ))
+                if reviews:
+                    break
             except (APIError, ValidationError, KeyError, TypeError, ValueError) as exc:
-                warnings.append(f"Shikimori profile: {exc}")
-            failures = []
-            # Older deployments reject kind=review; the typed topics route is
-            # the documented alternative. Stop as soon as useful text is found.
-            routes = [
-                ("reviews", {"target_id": profile.mal_id, "target_type": "Anime"}),
-                (f"animes/{profile.mal_id}/topics", {"kind": "review"}),
-                ("topics", {"linked_id": profile.mal_id, "linked_type": "Anime",
-                            "type": "Topics::EntryTopics::ReviewTopic"}),
-            ]
-            for path, params in routes:
-                try:
-                    rows = _review_rows(await self._shiki(
-                        path, **params, limit=min(review_limit, 30), page=1,
-                    ))
-                    for row in rows:
-                        content = row.get("review") if isinstance(row.get("review"), dict) else row
-                        text = _text(content.get("body")) or _text(content.get("html_body"))
-                        identifier = content.get("id", row.get("id"))
-                        if text and identifier is not None:
-                            url = row.get("url") or content.get("url")
-                            if url and url.startswith("/"):
-                                url = f"https://shikimori.one{url}"
-                            reviews.append(Review(
-                                text=text, source="shikimori", id=str(identifier),
-                                url=url or (f"https://shikimori.one/reviews/{identifier}"
-                                            if path == "reviews" else None),
-                            ))
-                    if reviews:
-                        break
-                except (APIError, ValidationError, KeyError, TypeError, ValueError) as exc:
-                    failures.append(f"{path}: {exc}")
-            if not reviews and failures:
-                warnings.append("Shikimori reviews: " + "; ".join(failures))
+                failures.append(f"{path}: {exc}")
+        if not reviews and failures:
+            warnings.append("Shikimori reviews: " + "; ".join(failures))
+        return profile, reviews
+
+    async def _fetch_anilist_evidence(
+        self, profile: TitleProfile, *, review_limit: int, warnings: list[str],
+        has_prior_reviews: bool,
+    ) -> tuple[TitleProfile, list[Review]]:
+        reviews: list[Review] = []
         try:
             selector = "id" if profile.anilist_id else "idMal"
             identifier = profile.anilist_id or profile.mal_id or profile.id
             data = await self._graphql(
                 "query ($id: Int!, $limit: Int!) { Media(" + selector
                 + ": $id, type: ANIME) { " + MEDIA_FIELDS
-                + " reviews(perPage: $limit, sort: RATING_DESC) { nodes { id body url } } } }",
+                + " reviews(perPage: $limit, sort: RATING_DESC) { nodes { id body siteUrl } } } }",
                 {"id": identifier, "limit": review_limit}, evidence=True,
             )
             media = data.get("Media")
             if not media:
                 raise APIError("AniList: title not found")
-            alternate = _anilist_profile(media)
-            profile = profile.model_copy(update={
-                "anilist_id": alternate.anilist_id,
-                "title": LocalizedTitle(
-                    ru=profile.title.ru, en=profile.title.en or alternate.title.en,
-                    romaji=profile.title.romaji or alternate.title.romaji,
-                ),
-                "genres": profile.genres or alternate.genres,
-                "synopsis": profile.synopsis or alternate.synopsis,
-                "score": profile.score if profile.score is not None else alternate.score,
-                "episodes": (
-                    profile.episodes if profile.episodes is not None else alternate.episodes
-                ),
-            })
+            profile = _merge_profile(profile, _anilist_profile(media), prefer_incoming=False)
             for row in (media.get("reviews") or {}).get("nodes", []):
                 text = _text(row.get("body"))
                 if text:
                     reviews.append(Review(
-                        text=text, source="anilist", id=str(row["id"]), url=row.get("url")
+                        text=text, source="anilist", id=str(row["id"]), url=row.get("siteUrl"),
                     ))
         except (APIError, ValidationError, KeyError, TypeError, ValueError) as exc:
             warnings.append(f"AniList evidence: {exc}")
-            # Metadata is independent evidence, not a fabricated review or proof
-            # of a fast start. Jikan supplies real episode-1 text when available.
-            if not reviews:
+            if not has_prior_reviews:
                 profile = await self._fallback_synopsis(profile, warnings)
                 warnings.append(
                     "AniList недоступен: резервные свидетельства — синопсис и "
                     "описание первой серии (если доступно); уверенность ограничена."
                 )
+        return profile, reviews
+
+    async def collect_evidence(
+        self, profile: TitleProfile, *, review_limit: int = 20
+    ) -> EvidenceBundle:
+        if not 1 <= review_limit <= 50:
+            raise ValueError("review_limit must be between 1 and 50")
+        warnings: list[str] = []
+        profile, shiki_reviews = await self._fetch_shikimori_evidence(
+            profile, review_limit=review_limit, warnings=warnings,
+        )
+        profile, anilist_reviews = await self._fetch_anilist_evidence(
+            profile, review_limit=review_limit, warnings=warnings,
+            has_prior_reviews=bool(shiki_reviews),
+        )
         seen: set[str] = set()
-        unique = []
-        for review in reviews:
+        unique: list[Review] = []
+        for review in [*shiki_reviews, *anilist_reviews]:
             key = " ".join(review.text.casefold().split())
             if key not in seen:
                 seen.add(key)
@@ -361,7 +370,9 @@ class Recommender:
             key=lambda item: (-item.rank_score, -item.report.hvi, item.profile.id),
         )[:limit]
         if not items:
-            warnings.append("Нет тайтлов с достаточными свидетельствами темпа или резервного допуска.")
+            warnings.append(
+                "Нет тайтлов с достаточными свидетельствами темпа или резервного допуска."
+            )
         return RecommendationResult(
             seed=seed, items=items, candidates_checked=len(sorted_candidates),
             warnings=list(dict.fromkeys(warnings)),
