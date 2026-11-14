@@ -5,7 +5,9 @@ DramaScore, and fetch fast-paced recommendations.
 """
 from __future__ import annotations
 
+import asyncio
 import json
+import math
 
 from mcp.server.mcpserver import MCPServer
 
@@ -110,6 +112,148 @@ async def anime_recommend_fast_paced(
             "warnings": result.warnings,
         }
         return json.dumps(output, indent=2, ensure_ascii=False)
+
+
+@mcp.tool()
+async def anime_resolve_title(
+    title: str,
+    proxy: str | None = None,
+) -> str:
+    """Resolve an anime title or ID into canonical metadata without review scraping.
+
+    Args:
+        title: Anime title in English/Russian or MAL/Shikimori ID.
+        proxy: Optional HTTP/SOCKS5 proxy URL. Defaults to ANIME_HOOK_PROXY when unset.
+    """
+    if not title.strip():
+        raise ValueError("title must be non-empty")
+    async with AsyncAPIClient(proxy=proxy) as client:
+        rec = Recommender(client)
+        profile = await rec.resolve(title)
+        return json.dumps(
+            {
+                "title": profile.title.display,
+                "id": profile.id,
+                "id_source": profile.id_source,
+                "score": profile.score,
+                "episodes": profile.episodes,
+                "genres": profile.genres,
+                "synopsis": profile.synopsis,
+            },
+            indent=2,
+            ensure_ascii=False,
+        )
+
+
+@mcp.tool()
+async def anime_compare_hooks(
+    titles: list[str],
+    review_limit: int = 10,
+    proxy: str | None = None,
+) -> str:
+    """Compare 2-5 anime titles side-by-side by Hook Velocity Index (HVI).
+
+    Args:
+        titles: List of 2-5 anime titles or IDs to compare.
+        review_limit: Maximum reviews to analyze per title (1-30, default 10).
+        proxy: Optional HTTP/SOCKS5 proxy URL. Defaults to ANIME_HOOK_PROXY when unset.
+    """
+    if not 1 <= review_limit <= 30:
+        raise ValueError("review_limit must be between 1 and 30")
+    cleaned = [t.strip() for t in titles if t.strip()]
+    if not 2 <= len(cleaned) <= 5:
+        raise ValueError("titles must contain between 2 and 5 non-empty entries")
+
+    results: list[dict[str, object]] = []
+    async with AsyncAPIClient(proxy=proxy) as client:
+        rec = Recommender(client)
+        for query in cleaned:
+            profile = await rec.resolve(query)
+            bundle = await rec.collect_evidence(profile, review_limit=review_limit)
+            report = rec.analyzer.analyze(bundle)
+            results.append(
+                {
+                    "query": query,
+                    "title": profile.title.display,
+                    "id": f"{profile.id_source}:{profile.id}",
+                    **report.as_summary(),
+                    "warnings": report.warnings,
+                }
+            )
+
+    results.sort(key=lambda r: float(r.get("hook_velocity_index", 0.0)), reverse=True)
+    return json.dumps({"comparison": results}, indent=2, ensure_ascii=False)
+
+
+@mcp.tool()
+async def anime_batch_filter(
+    titles: list[str],
+    min_hvi: float = 60.0,
+    review_limit: int = 10,
+    proxy: str | None = None,
+) -> str:
+    """Filter 1-10 anime titles by minimum Hook Velocity Index with per-item error isolation.
+
+    Args:
+        titles: List of 1-10 anime titles or IDs to evaluate.
+        min_hvi: Minimum acceptable Hook Velocity Index (0-100, default 60.0).
+        review_limit: Maximum reviews to analyze per title (1-30, default 10).
+        proxy: Optional HTTP/SOCKS5 proxy URL. Defaults to ANIME_HOOK_PROXY when unset.
+    """
+    if not math.isfinite(min_hvi) or not 0.0 <= min_hvi <= 100.0:
+        raise ValueError("min_hvi must be a finite number between 0 and 100")
+    if not 1 <= review_limit <= 30:
+        raise ValueError("review_limit must be between 1 and 30")
+    cleaned = [t.strip() for t in titles if t.strip()]
+    if not 1 <= len(cleaned) <= 10:
+        raise ValueError("titles must contain between 1 and 10 non-empty entries")
+
+    sem = asyncio.Semaphore(3)
+    passed: list[dict[str, object]] = []
+    filtered_out: list[dict[str, object]] = []
+    errors: list[dict[str, object]] = []
+
+    async with AsyncAPIClient(proxy=proxy) as client:
+        rec = Recommender(client)
+
+        async def _eval(query: str) -> None:
+            async with sem:
+                try:
+                    profile = await rec.resolve(query)
+                    bundle = await rec.collect_evidence(profile, review_limit=review_limit)
+                    report = rec.analyzer.analyze(bundle)
+                    summary = report.as_summary()
+                    hvi = float(summary.get("hook_velocity_index", 0.0))
+                    entry: dict[str, object] = {
+                        "query": query,
+                        "title": profile.title.display,
+                        "id": f"{profile.id_source}:{profile.id}",
+                        **summary,
+                        "warnings": report.warnings,
+                    }
+                    if hvi >= min_hvi:
+                        passed.append(entry)
+                    else:
+                        filtered_out.append(entry)
+                except Exception as exc:  # noqa: BLE001 - isolate per-item failure
+                    errors.append({"query": query, "error": str(exc)})
+
+        await asyncio.gather(*(_eval(q) for q in cleaned))
+
+    passed.sort(key=lambda r: float(r.get("hook_velocity_index", 0.0)), reverse=True)
+    return json.dumps(
+        {
+            "min_hvi": min_hvi,
+            "passed_count": len(passed),
+            "filtered_out_count": len(filtered_out),
+            "error_count": len(errors),
+            "passed": passed,
+            "filtered_out": filtered_out,
+            "errors": errors,
+        },
+        indent=2,
+        ensure_ascii=False,
+    )
 
 
 def main() -> None:
